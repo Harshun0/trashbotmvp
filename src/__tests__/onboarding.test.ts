@@ -40,6 +40,9 @@ vi.mock("@/lib/prisma", () => ({
     message: {
       create: vi.fn(),
     },
+    quote: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
   },
 }));
 
@@ -49,10 +52,16 @@ vi.mock("@/queues", () => ({
   sweeperQueue: { add: vi.fn(), upsertJobScheduler: vi.fn() },
 }));
 
+vi.mock("@/bot/quotes", () => ({
+  getPendingQuote: vi.fn().mockResolvedValue(null),
+  handleSellerQuoteReply: vi.fn(),
+}));
+
 // ─── Import mocked modules AFTER vi.mock declarations ────────────────────────
 import { prisma } from "@/lib/prisma";
 import { sendQueue } from "@/queues";
 import { handleOnboarding, extractText, extractButtonId, BTN } from "@/bot/onboarding";
+import { getPendingQuote, handleSellerQuoteReply } from "@/bot/quotes";
 import type { InternalInboundMessage } from "@/providers/types";
 import type { Party } from "@prisma/client";
 
@@ -426,6 +435,42 @@ describe("DONE step", () => {
 
   it("'namaste' → sends registered menu", async () => {
     await handleOnboarding(ctx(textMsg("namaste", "wamid_nam")));
+    expect(queueAdd).toHaveBeenCalled();
+  });
+});
+
+// ─── DONE + pending quote (buyer-only pivot) ───────────────────────────────────
+
+describe("DONE step — seller with a pending broadcast quote", () => {
+  const mockedGetPendingQuote = getPendingQuote as unknown as ReturnType<typeof vi.fn>;
+  const mockedHandleSellerQuoteReply = handleSellerQuoteReply as unknown as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    party.findUnique.mockResolvedValue(
+      baseParty("DONE", { role: "SELLER", name: "Rahul", city: "Mumbai" })
+    );
+  });
+
+  it("even a plain 'hi' is routed to the quote reply handler, not the registered menu", async () => {
+    mockedGetPendingQuote.mockResolvedValue({ id: "quote_1", status: "PENDING" });
+
+    await handleOnboarding(ctx(textMsg("hi", "wamid_q1")));
+
+    expect(mockedHandleSellerQuoteReply).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ role: "SELLER" }),
+      expect.objectContaining({ id: "quote_1" })
+    );
+    // No registered-menu reply was sent for this message
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
+
+  it("no pending quote → falls through to the normal registered-menu/listings flow", async () => {
+    mockedGetPendingQuote.mockResolvedValue(null);
+
+    await handleOnboarding(ctx(textMsg("hi", "wamid_q2")));
+
+    expect(mockedHandleSellerQuoteReply).not.toHaveBeenCalled();
     expect(queueAdd).toHaveBeenCalled();
   });
 });

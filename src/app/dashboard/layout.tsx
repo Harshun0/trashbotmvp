@@ -25,11 +25,12 @@ export default async function DashboardLayout({ children }: { children: React.Re
               <Link href="/dashboard" className="hover:text-foreground">Home</Link>
               {admin && (
                 <>
-                  <Link href="/dashboard/listings" className="hover:text-foreground">Listings</Link>
                   <Link href="/dashboard/requirements" className="hover:text-foreground">Requirements</Link>
-                  <Link href="/dashboard/matches" className="hover:text-foreground">Matches</Link>
+                  <Link href="/dashboard/quotes" className="hover:text-foreground">Quotes</Link>
                   <Link href="/dashboard/sellers" className="hover:text-foreground">Sellers</Link>
                   <Link href="/dashboard/buyers" className="hover:text-foreground">Buyers</Link>
+                  <Link href="/dashboard/listings" className="hover:text-foreground">Listings (old)</Link>
+                  <Link href="/dashboard/matches" className="hover:text-foreground">Matches (old)</Link>
                 </>
               )}
             </nav>

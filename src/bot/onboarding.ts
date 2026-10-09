@@ -17,6 +17,7 @@ import type { InternalInboundMessage } from "@/providers/types";
 import { enqueueReply, buildButtons, buildText } from "./helpers";
 import { callLLM } from "./llm";
 import { routeRegisteredUser } from "./listings";
+import { getPendingQuote, handleSellerQuoteReply } from "./quotes";
 import { z } from "zod";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -245,6 +246,17 @@ async function handleAskAlerts(ctx: BotContext, party: Party): Promise<void> {
 // ─── Step: DONE ───────────────────────────────────────────────────────────────
 
 async function handleDone(ctx: BotContext, party: Party): Promise<void> {
+  // A seller (or BOTH) replying to a broadcast quote request takes priority
+  // over everything else — including a casual "hi" — since that's the one
+  // thing the bot is waiting on from them right now.
+  if (party.role === "SELLER" || party.role === "BOTH") {
+    const pendingQuote = await getPendingQuote(ctx.orgId, party.id);
+    if (pendingQuote) {
+      await handleSellerQuoteReply(ctx, party, pendingQuote);
+      return;
+    }
+  }
+
   const text = extractText(ctx.parsed).toLowerCase().trim();
   const greetings = ["hi", "hello", "hey", "hii", "helo", "namaste", "namaskar"];
 

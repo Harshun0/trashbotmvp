@@ -9,6 +9,7 @@
     "lint": "eslint",
     "worker": "tsx --env-file=.env src/queues/worker.ts",
     "create-admin": "tsx --env-file=.env scripts/create-admin.ts",
+    "seed-demo-sellers": "tsx --env-file=.env scripts/seed-demo-sellers.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

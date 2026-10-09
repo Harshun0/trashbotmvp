@@ -34,6 +34,7 @@ vi.mock("@/lib/prisma", () => ({
     webhookEvent: { findUnique: vi.fn(), update: vi.fn() },
     listing: { findFirst: vi.fn(), findUnique: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn() },
     requirement: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+    quote: { findFirst: vi.fn().mockResolvedValue(null) },
   },
 }));
 

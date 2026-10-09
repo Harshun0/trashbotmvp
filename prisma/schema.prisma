@@ -28,6 +28,7 @@ model Organization {
   listings      Listing[]
   requirements  Requirement[]
   matches       Match[]
+  quotes        Quote[]
 
   @@map("organizations")
 }
@@ -249,6 +250,7 @@ model Party {
   contact      Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade)
   listings     Listing[]
   requirements Requirement[]
+  quotes       Quote[]
 
   @@index([organizationId])
   @@index([organizationId, role])
@@ -336,15 +338,19 @@ model Requirement {
   category       String?
   quantity       Decimal?
   unit           String?
-  maxPrice       Decimal?
+  maxPrice       Decimal?          // buyer's budget
   location       String?
+  deadlineDays   Int?              // "kitne din mein chahiye" — days from creation
+  broadcastAt    DateTime?         // set once sellers in this location have been notified
   status         RequirementStatus @default(OPEN)
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  buyerParty   Party        @relation(fields: [buyerPartyId], references: [id], onDelete: Cascade)
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  buyerParty   Party             @relation(fields: [buyerPartyId], references: [id], onDelete: Cascade)
   matches      Match[]
+  media        RequirementMedia[]
+  quotes       Quote[]
 
   @@index([organizationId])
   @@index([organizationId, status])
@@ -355,6 +361,68 @@ model Requirement {
 enum RequirementStatus {
   OPEN
   CLOSED
+}
+
+model RequirementMedia {
+  id              String   @id @default(cuid())
+  requirementId   String
+  whatsappMediaId String
+  storageUrl      String?
+  mimeType        String?
+  createdAt       DateTime @default(now())
+
+  requirement Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+
+  @@index([requirementId])
+  @@map("requirement_media")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Seller quotes — a buyer's requirement is broadcast to local sellers, each
+// seller's response (price, delivery time, quality, optional photos) is a Quote.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Quote {
+  id             String      @id @default(cuid())
+  organizationId String
+  requirementId  String
+  sellerPartyId  String
+  price          Decimal?
+  deliverByDays  Int?
+  quality        String?
+  status         QuoteStatus @default(PENDING)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  requirement  Requirement  @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  sellerParty  Party        @relation(fields: [sellerPartyId], references: [id], onDelete: Cascade)
+  media        QuoteMedia[]
+
+  @@unique([requirementId, sellerPartyId])
+  @@index([organizationId])
+  @@index([requirementId])
+  @@index([sellerPartyId])
+  @@map("quotes")
+}
+
+enum QuoteStatus {
+  PENDING
+  SUBMITTED
+}
+
+model QuoteMedia {
+  id              String   @id @default(cuid())
+  quoteId         String
+  whatsappMediaId String
+  storageUrl      String?
+  mimeType        String?
+  createdAt       DateTime @default(now())
+
+  quote Quote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  @@index([quoteId])
+  @@map("quote_media")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

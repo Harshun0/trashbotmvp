@@ -37,9 +37,21 @@ vi.mock("@/lib/prisma", () => ({
       count: vi.fn(),
       create: vi.fn(),
     },
+    requirementMedia: {
+      create: vi.fn(),
+    },
     message: {
       findMany: vi.fn(),
       create: vi.fn(),
+    },
+    party: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    quote: {
+      upsert: vi.fn(),
+    },
+    conversation: {
+      findUnique: vi.fn(),
     },
   },
 }));
@@ -51,7 +63,10 @@ vi.mock("@/queues", () => ({
 }));
 
 vi.mock("@/bot/extractor", () => ({ extractIntent: vi.fn() }));
-vi.mock("@/bot/rate-limit", () => ({ allowLLMCall: vi.fn().mockResolvedValue(true) }));
+vi.mock("@/bot/rate-limit", () => ({
+  allowLLMCall: vi.fn().mockResolvedValue(true),
+  allowAlert: vi.fn().mockResolvedValue(true),
+}));
 vi.mock("@/providers", () => ({ getProvider: vi.fn() }));
 vi.mock("@/lib/storage", () => ({ getStorage: vi.fn() }));
 
@@ -76,6 +91,9 @@ const requirement = prisma.requirement as unknown as {
 };
 const listingMedia = prisma.listingMedia as unknown as { count: MockFn; create: MockFn };
 const message = prisma.message as unknown as { findMany: MockFn; create: MockFn };
+const party = prisma.party as unknown as { findMany: MockFn };
+const quote = prisma.quote as unknown as { upsert: MockFn };
+const conversation = prisma.conversation as unknown as { findUnique: MockFn };
 const queueAdd = sendQueue.add as MockFn;
 const mockedExtractIntent = extractIntent as unknown as MockFn;
 const mockedAllowLLMCall = allowLLMCall as unknown as MockFn;
@@ -366,23 +384,123 @@ describe("Seller flow — close listing", () => {
 
 // ─── 7. Buyer requirement ─────────────────────────────────────────────────────
 
-describe("Buyer flow — create requirement", () => {
-  it("'mujhe 50 ton cement chahiye Pune me' → creates OPEN Requirement with summary buttons", async () => {
+describe("Buyer flow — progressive field collection + broadcast", () => {
+  it("product-only message → creates OPEN Requirement, asks quantity+unit", async () => {
     requirement.findFirst.mockResolvedValue(null);
     requirement.create.mockResolvedValue({
-      id: "req_1", product: "cement", quantity: 50, unit: "ton", maxPrice: null, location: "Pune", status: "OPEN",
+      id: "req_1", product: "cement", quantity: null, unit: null, maxPrice: null, location: null, deadlineDays: null, broadcastAt: null, status: "OPEN",
     });
-    mockedExtractIntent.mockResolvedValue(
-      extracted({ intent: "create_requirement", product: "cement", quantity: 50, unit: "ton", location: "Pune" })
-    );
+    mockedExtractIntent.mockResolvedValue(extracted({ intent: "create_requirement", product: "cement" }));
 
-    await routeRegisteredUser(ctx(textMsg("mujhe 50 ton cement chahiye Pune me")), buyerParty());
+    await routeRegisteredUser(ctx(textMsg("mujhe cement chahiye")), buyerParty());
 
     expect(requirement.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ product: "cement" }) })
+    );
+    expect(queueAdd).toHaveBeenCalledWith(
+      "send-message",
+      expect.objectContaining({ content: expect.objectContaining({ body: expect.stringContaining("quantity") }) }),
+      expect.anything()
+    );
+  });
+
+  it("quantity+unit added → asks budget", async () => {
+    const draft = { id: "req_1", product: "cement", quantity: null, unit: null, maxPrice: null, location: null, deadlineDays: null, broadcastAt: null, status: "OPEN" };
+    requirement.findFirst.mockResolvedValue(draft);
+    requirement.update.mockResolvedValue({ ...draft, quantity: 50, unit: "ton" });
+    mockedExtractIntent.mockResolvedValue(extracted({ intent: "add_details", quantity: 50, unit: "ton" }));
+
+    await routeRegisteredUser(ctx(textMsg("50 ton")), buyerParty());
+
+    expect(queueAdd).toHaveBeenCalledWith(
+      "send-message",
+      expect.objectContaining({ content: expect.objectContaining({ body: expect.stringContaining("Budget") }) }),
+      expect.anything()
+    );
+  });
+
+  it("budget added → asks location", async () => {
+    const draft = { id: "req_1", product: "cement", quantity: 50, unit: "ton", maxPrice: null, location: null, deadlineDays: null, broadcastAt: null, status: "OPEN" };
+    requirement.findFirst.mockResolvedValue(draft);
+    requirement.update.mockResolvedValue({ ...draft, maxPrice: 40 });
+    mockedExtractIntent.mockResolvedValue(extracted({ intent: "add_details", price: 40 }));
+
+    await routeRegisteredUser(ctx(textMsg("40 per ton")), buyerParty());
+
+    expect(queueAdd).toHaveBeenCalledWith(
+      "send-message",
+      expect.objectContaining({ content: expect.objectContaining({ body: expect.stringContaining("city") }) }),
+      expect.anything()
+    );
+  });
+
+  it("location added → asks deadline", async () => {
+    const draft = { id: "req_1", product: "cement", quantity: 50, unit: "ton", maxPrice: 40, location: null, deadlineDays: null, broadcastAt: null, status: "OPEN" };
+    requirement.findFirst.mockResolvedValue(draft);
+    requirement.update.mockResolvedValue({ ...draft, location: "Pune" });
+    mockedExtractIntent.mockResolvedValue(extracted({ intent: "add_details", location: "Pune" }));
+
+    await routeRegisteredUser(ctx(textMsg("Pune")), buyerParty());
+
+    expect(queueAdd).toHaveBeenCalledWith(
+      "send-message",
+      expect.objectContaining({ content: expect.objectContaining({ body: expect.stringContaining("din") }) }),
+      expect.anything()
+    );
+  });
+
+  it("deadline added (all fields present) → broadcasts to matching sellers and confirms", async () => {
+    const draft = { id: "req_1", product: "cement", quantity: 50, unit: "ton", maxPrice: 40, location: "Pune", deadlineDays: null, broadcastAt: null, status: "OPEN" };
+    requirement.findFirst.mockResolvedValue(draft);
+    const complete = { ...draft, deadlineDays: 3 };
+    requirement.update.mockResolvedValue(complete);
+    party.findMany.mockResolvedValue([
+      { id: "seller_1", contactId: "seller_contact_1", city: "Pune", role: "SELLER", onboardingStep: "DONE" },
+    ]);
+    conversation.findUnique.mockResolvedValue({ id: "conv_seller_1", lastInboundAt: new Date(), contact: { waPhone: "+919900000099" } });
+    quote.upsert.mockResolvedValue({ id: "quote_1" });
+    mockedExtractIntent.mockResolvedValue(extracted({ intent: "add_details", deadlineDays: 3 }));
+
+    await routeRegisteredUser(ctx(textMsg("3 din mein")), buyerParty());
+
+    expect(quote.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ product: "cement", quantity: 50, unit: "ton", location: "Pune" }),
+        where: { requirementId_sellerPartyId: { requirementId: "req_1", sellerPartyId: "seller_1" } },
       })
     );
+    expect(requirement.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "req_1" }, data: { broadcastAt: expect.any(Date) } })
+    );
+    // Buyer gets a confirmation that sellers were contacted
+    expect(queueAdd).toHaveBeenCalledWith(
+      "send-message",
+      expect.objectContaining({ content: expect.objectContaining({ body: expect.stringContaining("seller") }) }),
+      expect.anything()
+    );
+  });
+
+  it("no matching sellers in the location → still confirms, doesn't crash", async () => {
+    const draft = { id: "req_2", product: "steel", quantity: 10, unit: "ton", maxPrice: 50, location: "Nowhere City", deadlineDays: null, broadcastAt: null, status: "OPEN" };
+    requirement.findFirst.mockResolvedValue(draft);
+    requirement.update.mockResolvedValue({ ...draft, deadlineDays: 2 });
+    party.findMany.mockResolvedValue([]);
+    mockedExtractIntent.mockResolvedValue(extracted({ intent: "add_details", deadlineDays: 2 }));
+
+    await expect(routeRegisteredUser(ctx(textMsg("2 din")), buyerParty())).resolves.toBeUndefined();
+
+    expect(queueAdd).toHaveBeenCalled();
+  });
+
+  it("editing an already-broadcast requirement → sends the button summary, doesn't re-broadcast", async () => {
+    const draft = { id: "req_3", product: "cement", quantity: 50, unit: "ton", maxPrice: 40, location: "Pune", deadlineDays: 3, broadcastAt: new Date(), status: "OPEN" };
+    requirement.findFirst.mockResolvedValue(draft);
+    requirement.update.mockResolvedValue({ ...draft, maxPrice: 45 });
+
+    mockedExtractIntent.mockResolvedValue(extracted({ intent: "add_details", price: 45 }));
+
+    await routeRegisteredUser(ctx(textMsg("budget 45 kar do")), buyerParty());
+
+    expect(party.findMany).not.toHaveBeenCalled();
     expect(queueAdd).toHaveBeenCalledWith(
       "send-message",
       expect.objectContaining({
@@ -599,14 +717,16 @@ describe("Product mismatch — new product while one is already in progress", ()
       expect.objectContaining({ data: expect.objectContaining({ product: "plastic bottle" }) })
     );
     expect(requirement.update).not.toHaveBeenCalled();
-    // Reply must reflect the NEW product, not the stale "Pp bags"
+    // The new requirement is missing budget — reply must ask for it, and must
+    // never mention the stale "Pp bags" product from the old requirement.
     expect(queueAdd).toHaveBeenCalledWith(
       "send-message",
-      expect.objectContaining({
-        content: expect.objectContaining({
-          interactive: expect.objectContaining({ body: { text: expect.stringContaining("plastic bottle") } }),
-        }),
-      }),
+      expect.objectContaining({ content: expect.objectContaining({ body: expect.stringContaining("Budget") }) }),
+      expect.anything()
+    );
+    expect(queueAdd).not.toHaveBeenCalledWith(
+      "send-message",
+      expect.objectContaining({ content: expect.objectContaining({ body: expect.stringContaining("Pp bags") }) }),
       expect.anything()
     );
   });

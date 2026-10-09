@@ -16,6 +16,7 @@ import { enqueueReply, buildButtons, buildText } from "./helpers";
 import { extractIntent, type ExtractedIntent, type DraftState } from "./extractor";
 import { allowLLMCall } from "./rate-limit";
 import { runMatchingForListing, runMatchingForRequirement, handleBuyerInterested, productsMatch } from "./matching";
+import { broadcastRequirementToSellers } from "./quotes";
 import { buildMagicLink } from "@/lib/magic-link";
 import { BTN, extractText, extractButtonId, type BotContext } from "./onboarding";
 
@@ -460,6 +461,7 @@ async function handleBuyerMessage(
         unit: extracted.unit ?? undefined,
         maxPrice: extracted.price ?? undefined,
         location: extracted.location ?? undefined,
+        deadlineDays: extracted.deadlineDays ?? undefined,
       },
     });
     console.info("[Listings] requirement created", { contactId: party.contactId, id: requirement.id });
@@ -471,12 +473,13 @@ async function handleBuyerMessage(
         unit: extracted.unit ?? requirement.unit ?? undefined,
         maxPrice: extracted.price ?? (requirement.maxPrice as unknown as number | null) ?? undefined,
         location: extracted.location ?? requirement.location ?? undefined,
+        deadlineDays: extracted.deadlineDays ?? requirement.deadlineDays ?? undefined,
       },
     });
     console.info("[Listings] requirement updated", { contactId: party.contactId, id: requirement.id });
   }
 
-  await sendRequirementSummary(ctx, party, requirement);
+  await askNextOrBroadcast(ctx, party, requirement);
 
   try {
     await runMatchingForRequirement(ctx.orgId, requirement);
@@ -485,12 +488,79 @@ async function handleBuyerMessage(
   }
 }
 
+async function askNextOrBroadcast(ctx: BotContext, party: Party, requirement: Requirement): Promise<void> {
+  if (requirement.quantity == null || !requirement.unit) {
+    await enqueueReply({
+      organizationId: ctx.orgId,
+      conversationId: ctx.conversation.id,
+      to: ctx.contact.waPhone,
+      content: buildText("Kitni quantity chahiye aur kis unit mein? Jaise: *100 ton* ya *50 bags*"),
+      dedupeKey: `req_ask_qty_${ctx.parsed.providerId}_${requirement.id}`,
+    });
+    return;
+  }
+  if (requirement.maxPrice == null) {
+    await enqueueReply({
+      organizationId: ctx.orgId,
+      conversationId: ctx.conversation.id,
+      to: ctx.contact.waPhone,
+      content: buildText(`Budget kya hai per ${requirement.unit}?`),
+      dedupeKey: `req_ask_price_${ctx.parsed.providerId}_${requirement.id}`,
+    });
+    return;
+  }
+  if (!requirement.location) {
+    await enqueueReply({
+      organizationId: ctx.orgId,
+      conversationId: ctx.conversation.id,
+      to: ctx.contact.waPhone,
+      content: buildText("Kis city mein chahiye?"),
+      dedupeKey: `req_ask_location_${ctx.parsed.providerId}_${requirement.id}`,
+    });
+    return;
+  }
+  if (requirement.deadlineDays == null) {
+    await enqueueReply({
+      organizationId: ctx.orgId,
+      conversationId: ctx.conversation.id,
+      to: ctx.contact.waPhone,
+      content: buildText("Kitne din mein chahiye?"),
+      dedupeKey: `req_ask_deadline_${ctx.parsed.providerId}_${requirement.id}`,
+    });
+    return;
+  }
+
+  if (!requirement.broadcastAt) {
+    let sentCount = 0;
+    try {
+      sentCount = await broadcastRequirementToSellers(ctx.orgId, requirement);
+    } catch (err) {
+      console.error("[Quotes] broadcast failed", { requirementId: requirement.id, err: (err as Error).message });
+    }
+    await enqueueReply({
+      organizationId: ctx.orgId,
+      conversationId: ctx.conversation.id,
+      to: ctx.contact.waPhone,
+      content: buildText(
+        sentCount > 0
+          ? `✅ Note kar liya! *${requirement.location}* ke ${sentCount} seller(s) ko bhej diya hai — jald hi quotes aana shuru ho jaayenge. Photo add karni ho to abhi bhej dijiye (optional).`
+          : `✅ Note kar liya! Abhi *${requirement.location}* mein koi seller registered nahi hai, jaise hi koi add hoga use bhej dunga.`
+      ),
+      dedupeKey: `req_broadcast_done_${requirement.id}`,
+    });
+    return;
+  }
+
+  await sendRequirementSummary(ctx, party, requirement);
+}
+
 async function sendRequirementSummary(ctx: BotContext, party: Party, req: Requirement): Promise<void> {
   const lines = [`🔍 *${req.product}*`];
   if (req.quantity != null) lines.push(`Quantity: ${req.quantity}${req.unit ? " " + req.unit : ""}`);
   if (req.maxPrice != null) lines.push(`Max price: ₹${req.maxPrice}`);
   if (req.location) lines.push(`Location: ${req.location}`);
-  lines.push("", "Maine aapki request note kar li hai, match milte hi bata dunga!");
+  if (req.deadlineDays != null) lines.push(`Deadline: ${req.deadlineDays} din`);
+  lines.push("", "Updated! Sellers ko already bhej diya hai.");
 
   await enqueueReply({
     organizationId: ctx.orgId,
@@ -603,9 +673,16 @@ async function sendNeedProduct(ctx: BotContext, party: Party, mode: "sell" | "bu
 // ─── Photo handling ───────────────────────────────────────────────────────────
 
 async function handleIncomingPhoto(ctx: BotContext, party: Party): Promise<void> {
-  if (party.role === "BUYER") return; // only sellers (and BOTH) attach photos to listings
+  if (party.role === "BUYER") {
+    await handleRequirementPhoto(ctx, party);
+    return;
+  }
 
   const listing = await getDraftOrOpenListing(ctx.orgId, party.id);
+  if (!listing && party.role === "BOTH") {
+    await handleRequirementPhoto(ctx, party);
+    return;
+  }
   if (!listing) {
     await enqueueReply({
       organizationId: ctx.orgId,
@@ -679,6 +756,66 @@ async function handleIncomingPhoto(ctx: BotContext, party: Party): Promise<void>
   });
 }
 
+/** Buyer's optional reference photo of what they want, attached to their open Requirement. */
+async function handleRequirementPhoto(ctx: BotContext, party: Party): Promise<void> {
+  const requirement = await getOpenRequirement(ctx.orgId, party.id);
+  if (!requirement) {
+    await enqueueReply({
+      organizationId: ctx.orgId,
+      conversationId: ctx.conversation.id,
+      to: ctx.contact.waPhone,
+      content: buildText("Pehle batayiye aapko kya chahiye, phir photo bhejiye."),
+      dedupeKey: `req_photo_norequirement_${ctx.parsed.providerId}_${party.id}`,
+    });
+    return;
+  }
+
+  const imageContent = ctx.parsed.content as { id?: string } | null;
+  const mediaId = imageContent?.id;
+  if (!mediaId) return;
+
+  let storageUrl: string | null = null;
+  let mimeType: string | null = null;
+  try {
+    const provider = getProvider();
+    const { buffer, mimeType: mt } = await provider.downloadMedia(mediaId);
+    mimeType = mt;
+    const storage = getStorage();
+    if (storage) {
+      const uploaded = await storage.upload(buffer, mt);
+      storageUrl = uploaded.url;
+    }
+  } catch (err) {
+    console.error("[Listings] requirement media download failed", {
+      contactId: party.contactId,
+      err: (err as Error).message,
+    });
+  }
+
+  await prisma.requirementMedia.create({
+    data: {
+      requirementId: requirement.id,
+      whatsappMediaId: mediaId,
+      storageUrl: storageUrl ?? undefined,
+      mimeType: mimeType ?? undefined,
+    },
+  });
+
+  console.info("[Listings] requirement photo saved", {
+    contactId: party.contactId,
+    requirementId: requirement.id,
+    stored: Boolean(storageUrl),
+  });
+
+  await enqueueReply({
+    organizationId: ctx.orgId,
+    conversationId: ctx.conversation.id,
+    to: ctx.contact.waPhone,
+    content: buildText(storageUrl ? "📸 Photo add ho gayi!" : "📸 Photo note kar li hai."),
+    dedupeKey: `req_photo_saved_${ctx.parsed.providerId}_${requirement.id}`,
+  });
+}
+
 // ─── Data helpers ─────────────────────────────────────────────────────────────
 
 async function getDraftListing(orgId: string, sellerPartyId: string): Promise<Listing | null> {
@@ -726,6 +863,7 @@ function toDraftState(row: Listing | Requirement): DraftState {
     unit: l.unit ?? null,
     price: (l.pricePerUnit ?? l.maxPrice) != null ? Number(l.pricePerUnit ?? l.maxPrice) : null,
     location: l.location ?? null,
+    deadlineDays: l.deadlineDays ?? null,
   };
 }
 

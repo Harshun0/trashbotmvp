@@ -47,6 +47,8 @@ const envSchema = z.object({
   // Required only once you have real matches firing outside the service window.
   WA_TEMPLATE_MATCH_BUYER: z.string().optional(),
   WA_TEMPLATE_MATCH_SELLER: z.string().optional(),
+  // Sent to a seller outside the 24h window when their location matches a new buyer requirement.
+  WA_TEMPLATE_QUOTE_REQUEST: z.string().optional(),
   WA_TEMPLATE_LANGUAGE: z.string().default("en_US"),
 
   // Phase 4 — dashboard

@@ -62,3 +62,16 @@ export async function getParties(orgId: string, role: "SELLER" | "BUYER") {
 export async function getPartyById(partyId: string) {
   return prisma.party.findUnique({ where: { id: partyId } });
 }
+
+export async function getQuotes(orgId: string, requirementId?: string) {
+  return prisma.quote.findMany({
+    where: { organizationId: orgId, ...(requirementId ? { requirementId } : {}) },
+    orderBy: { createdAt: "desc" },
+    include: {
+      requirement: { select: { product: true, location: true, buyerParty: { select: { name: true } } } },
+      sellerParty: { select: { name: true, city: true, contact: { select: { waPhone: true } } } },
+      media: { select: { id: true, storageUrl: true } },
+    },
+    take: 200,
+  });
+}

@@ -21,20 +21,20 @@ export default async function DashboardHome() {
   }
 
   if (isAdmin(session)) {
-    const [sellerCount, buyerCount, openListings, openRequirements, matchCount] = await Promise.all([
+    const [sellerCount, buyerCount, openRequirements, pendingQuotes, submittedQuotes] = await Promise.all([
       prisma.party.count({ where: { organizationId: orgId, role: { in: ["SELLER", "BOTH"] } } }),
       prisma.party.count({ where: { organizationId: orgId, role: { in: ["BUYER", "BOTH"] } } }),
-      prisma.listing.count({ where: { organizationId: orgId, status: "OPEN" } }),
       prisma.requirement.count({ where: { organizationId: orgId, status: "OPEN" } }),
-      prisma.match.count({ where: { organizationId: orgId } }),
+      prisma.quote.count({ where: { organizationId: orgId, status: "PENDING" } }),
+      prisma.quote.count({ where: { organizationId: orgId, status: "SUBMITTED" } }),
     ]);
 
     const stats = [
       { label: "Sellers", value: sellerCount, href: "/dashboard/sellers" },
       { label: "Buyers", value: buyerCount, href: "/dashboard/buyers" },
-      { label: "Open listings", value: openListings, href: "/dashboard/listings" },
       { label: "Open requirements", value: openRequirements, href: "/dashboard/requirements" },
-      { label: "Matches", value: matchCount, href: "/dashboard/matches" },
+      { label: "Quotes pending", value: pendingQuotes, href: "/dashboard/quotes" },
+      { label: "Quotes submitted", value: submittedQuotes, href: "/dashboard/quotes" },
     ];
 
     return (
