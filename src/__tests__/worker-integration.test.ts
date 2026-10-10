@@ -155,22 +155,22 @@ beforeEach(() => {
 // ─── 1. New contact text → Party created + ASK_ROLE enqueued ─────────────────
 
 describe("processInboundMessage — new contact text", () => {
-  it("creates Party and enqueues ASK_ROLE reply", async () => {
+  it("creates Party as BUYER and enqueues ASK_NAME reply (buyer-only pivot, no role question)", async () => {
     pty.findUnique.mockResolvedValue(null);
-    pty.create.mockResolvedValue(PARTY_NEW);
+    pty.create.mockResolvedValue({ ...PARTY_NEW, role: "BUYER", onboardingStep: "ASK_NAME" });
     pty.update.mockResolvedValue({ ...PARTY_NEW, onboardingStep: "ASK_NAME" });
 
     await processInboundMessage(textMsg(), ORG_ID);
 
     expect(pty.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ onboardingStep: "ASK_ROLE" }),
+        data: expect.objectContaining({ onboardingStep: "ASK_NAME", role: "BUYER" }),
       })
     );
     expect(qadd).toHaveBeenCalledWith(
       "send-message",
       expect.anything(),
-      expect.objectContaining({ jobId: expect.stringContaining(`onboard_role_${WAMID}`) })
+      expect.objectContaining({ jobId: expect.stringContaining(`onboard_name_${WAMID}`) })
     );
   });
 

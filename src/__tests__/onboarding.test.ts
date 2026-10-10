@@ -256,22 +256,22 @@ describe("ASK_ROLE step", () => {
     );
   });
 
-  it("'restart' keyword → resets step to ASK_ROLE", async () => {
-    party.findUnique.mockResolvedValue(baseParty("ASK_NAME"));
-    party.update.mockResolvedValue(baseParty("ASK_ROLE"));
+  it("'restart' keyword → resets step to ASK_NAME, role BUYER (buyer-only pivot)", async () => {
+    party.findUnique.mockResolvedValue(baseParty("DONE", { role: "BUYER", name: "Rahul" }));
+    party.update.mockResolvedValue(baseParty("ASK_NAME", { role: "BUYER" }));
 
     await handleOnboarding(ctx(textMsg("restart", "wamid_rst")));
 
     expect(party.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ onboardingStep: "ASK_ROLE" }),
+        data: expect.objectContaining({ onboardingStep: "ASK_NAME", role: "BUYER" }),
       })
     );
-    // Should also send the ASK_ROLE question
+    // Should also send the ASK_NAME question
     expect(queueAdd).toHaveBeenCalledWith(
       "send-message",
       expect.anything(),
-      expect.objectContaining({ jobId: expect.stringContaining("onboard_role_wamid_rst") })
+      expect.objectContaining({ jobId: expect.stringContaining("onboard_name_wamid_rst") })
     );
   });
 });
@@ -280,22 +280,22 @@ describe("ASK_ROLE step", () => {
 
 describe("ASK_NAME step", () => {
   beforeEach(() => {
-    party.findUnique.mockResolvedValue(baseParty("ASK_NAME", { role: "SELLER" }));
-    party.update.mockResolvedValue(baseParty("ASK_CITY"));
+    party.findUnique.mockResolvedValue(baseParty("ASK_NAME", { role: "BUYER" }));
+    party.update.mockResolvedValue(baseParty("DONE", { role: "BUYER", name: "Rahul Sharma" }));
   });
 
-  it("free text → sets name (raw fallback) + advances to ASK_CITY", async () => {
+  it("free text → sets name (raw fallback) + advances straight to DONE (buyer-only pivot)", async () => {
     await handleOnboarding(ctx(textMsg("Rahul Sharma", "wamid_nm1")));
 
     expect(party.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ onboardingStep: "ASK_CITY" }),
+        data: expect.objectContaining({ onboardingStep: "DONE", name: "Rahul Sharma" }),
       })
     );
     expect(queueAdd).toHaveBeenCalledWith(
       "send-message",
       expect.anything(),
-      expect.objectContaining({ jobId: expect.stringContaining("onboard_city_wamid_nm1") })
+      expect.objectContaining({ jobId: expect.stringContaining("onboard_done_wamid_nm1") })
     );
   });
 
@@ -501,21 +501,21 @@ describe("Duplicate webhook idempotency", () => {
 // ─── First message (new contact) ─────────────────────────────────────────────
 
 describe("First message", () => {
-  it("creates Party + sends ASK_ROLE question", async () => {
+  it("creates Party as BUYER + sends ASK_NAME question (buyer-only pivot, no role question)", async () => {
     party.findUnique.mockResolvedValue(null);
-    party.create.mockResolvedValue(baseParty("ASK_ROLE"));
+    party.create.mockResolvedValue(baseParty("ASK_NAME", { role: "BUYER" }));
 
     await handleOnboarding(ctx(textMsg("hi", "wamid_first")));
 
     expect(party.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ onboardingStep: "ASK_ROLE" }),
+        data: expect.objectContaining({ onboardingStep: "ASK_NAME", role: "BUYER" }),
       })
     );
     expect(queueAdd).toHaveBeenCalledWith(
       "send-message",
       expect.anything(),
-      expect.objectContaining({ jobId: expect.stringContaining("onboard_role_wamid_first") })
+      expect.objectContaining({ jobId: expect.stringContaining("onboard_name_wamid_first") })
     );
   });
 });

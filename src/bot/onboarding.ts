@@ -66,14 +66,22 @@ export async function handleOnboarding(ctx: BotContext): Promise<void> {
   let party = await prisma.party.findUnique({
     where: { contactId: contact.id },
   });
+  let isNewParty = false;
   if (!party) {
+    // Buyer-only pivot: every new contact is a buyer, no role question —
+    // straight to "what's your name". ASK_ROLE/ASK_CITY/ASK_ALERTS stay in
+    // the state machine (and their handlers below) but are unreachable from
+    // a fresh signup now; sellers are added directly in the backend instead.
     party = await prisma.party.create({
       data: {
         organizationId: orgId,
         contactId: contact.id,
-        onboardingStep: "ASK_ROLE",
+        role: "BUYER",
+        onboardingStep: "ASK_NAME",
+        alertPreference: "ALL",
       },
     });
+    isNewParty = true;
   }
 
   // Global keyword overrides
@@ -81,9 +89,16 @@ export async function handleOnboarding(ctx: BotContext): Promise<void> {
   if (["restart", "menu", "/menu", "/start"].includes(rawText)) {
     await prisma.party.update({
       where: { id: party.id },
-      data: { onboardingStep: "ASK_ROLE" },
+      data: { role: "BUYER", onboardingStep: "ASK_NAME" },
     });
-    await sendAskRole(ctx, party.id);
+    await sendAskName(ctx, party.id);
+    return;
+  }
+
+  // A brand new party hasn't answered anything yet — ask the first
+  // question rather than treating this inbound message as the answer to it.
+  if (isNewParty) {
+    await sendAskName(ctx, party.id);
     return;
   }
 
@@ -168,13 +183,14 @@ async function handleAskName(ctx: BotContext, party: Party): Promise<void> {
   });
 
   const name = extracted?.name ?? rawText;
-  console.info("[Onboarding] step", { contactId: party.contactId, step: "ASK_NAME", input: "text", next: "ASK_CITY" });
+  // Buyer-only pivot: no more city/alerts questions — straight to DONE.
+  console.info("[Onboarding] step", { contactId: party.contactId, step: "ASK_NAME", input: "text", next: "DONE" });
 
-  await prisma.party.update({
+  const updated = await prisma.party.update({
     where: { id: party.id },
-    data: { name, onboardingStep: "ASK_CITY" },
+    data: { name, onboardingStep: "DONE" },
   });
-  await sendAskCity(ctx, party.id);
+  await sendDone(ctx, updated);
 }
 
 // ─── Step: ASK_CITY ───────────────────────────────────────────────────────────
