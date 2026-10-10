@@ -31,7 +31,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     message: { create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), findMany: vi.fn() },
     party: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
-    webhookEvent: { findUnique: vi.fn(), update: vi.fn() },
+    webhookEvent: { findUnique: vi.fn(), update: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
     listing: { findFirst: vi.fn(), findUnique: vi.fn(), count: vi.fn(), create: vi.fn(), update: vi.fn() },
     requirement: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
     quote: { findFirst: vi.fn().mockResolvedValue(null) },
@@ -60,7 +60,8 @@ vi.mock("@/providers", () => ({
 
 import { prisma } from "@/lib/prisma";
 import { sendQueue } from "@/queues";
-import { processInboundMessage, processStatusUpdate } from "@/queues/worker";
+import { processInboundMessage, processStatusUpdate, runSweep } from "@/queues/worker";
+import { webhookQueue } from "@/queues";
 import { BTN } from "@/bot/onboarding";
 import { extractIntent } from "@/bot/extractor";
 
@@ -75,7 +76,9 @@ const conv = prisma.conversation as unknown as { findUnique: M; create: M; updat
 const msg  = prisma.message      as unknown as { create: M; findUnique: M; update: M; findMany: M };
 const pty  = prisma.party        as unknown as { findUnique: M; create: M; update: M };
 const list = prisma.listing      as unknown as { findFirst: M; findUnique: M; count: M; create: M; update: M };
+const we   = prisma.webhookEvent as unknown as { findUnique: M; update: M; findMany: M; updateMany: M };
 const qadd = sendQueue.add       as M;
+const wqadd = webhookQueue.add   as M;
 const mockedExtractIntent = extractIntent as unknown as M;
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -383,5 +386,68 @@ describe("processInboundMessage — Phase 2 seller listing (real Meta payload sh
       expect.objectContaining({ content: expect.objectContaining({ body: expect.stringContaining("quantity") }) }),
       expect.anything()
     );
+  });
+});
+
+// ─── 8. Sweeper — stuck webhook_events ────────────────────────────────────────
+
+describe("runSweep", () => {
+  it("re-enqueues a recently-stuck event with a fresh, non-colliding jobId", async () => {
+    const recent = { id: "evt_recent", createdAt: new Date(Date.now() - 5 * 60 * 1000), rawPayload: {}, provider: "meta" };
+    we.findMany.mockResolvedValue([recent]);
+    wqadd.mockResolvedValue(undefined);
+
+    await runSweep();
+
+    expect(wqadd).toHaveBeenCalledWith(
+      "process-webhook",
+      expect.objectContaining({ webhookEventId: "evt_recent" }),
+      expect.objectContaining({ jobId: expect.stringMatching(/^webhook_evt_recent_sweep_\d+$/) })
+    );
+    expect(we.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("permanently gives up on an event stuck for over an hour — marks processed, never re-enqueues it", async () => {
+    const ancient = { id: "evt_ancient", createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000), rawPayload: {}, provider: "meta" };
+    we.findMany.mockResolvedValue([ancient]);
+    we.updateMany.mockResolvedValue({ count: 1 });
+
+    await runSweep();
+
+    expect(we.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: { in: ["evt_ancient"] } },
+        data: expect.objectContaining({ processed: true }),
+      })
+    );
+    expect(wqadd).not.toHaveBeenCalled();
+  });
+
+  it("handles a mix of recent and ancient stuck events correctly", async () => {
+    const recent = { id: "evt_recent2", createdAt: new Date(Date.now() - 5 * 60 * 1000), rawPayload: {}, provider: "meta" };
+    const ancient = { id: "evt_ancient2", createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000), rawPayload: {}, provider: "meta" };
+    we.findMany.mockResolvedValue([ancient, recent]);
+    we.updateMany.mockResolvedValue({ count: 1 });
+    wqadd.mockResolvedValue(undefined);
+
+    await runSweep();
+
+    expect(we.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: { in: ["evt_ancient2"] } } })
+    );
+    expect(wqadd).toHaveBeenCalledWith(
+      "process-webhook",
+      expect.objectContaining({ webhookEventId: "evt_recent2" }),
+      expect.anything()
+    );
+  });
+
+  it("no stuck events → no-op", async () => {
+    we.findMany.mockResolvedValue([]);
+
+    await expect(runSweep()).resolves.toBeUndefined();
+
+    expect(we.updateMany).not.toHaveBeenCalled();
+    expect(wqadd).not.toHaveBeenCalled();
   });
 });

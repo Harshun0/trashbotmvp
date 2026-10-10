@@ -329,38 +329,65 @@ async function markDead(messageId: string, reason: string, retryCount: number) {
 // Finds webhook_events that are persisted but not yet processed (processed=false)
 // and re-enqueues them. Scheduled by the worker startup below.
 
+// A webhook_event whose original BullMQ job already exhausted its attempts
+// and terminally failed (e.g. a status update for a message we never sent —
+// Meta's own test/demo messages, which will never have a matching Message
+// row) can never be revived by re-adding a job with the SAME jobId: BullMQ
+// treats that id as already taken and silently no-ops. Past this age, give
+// up on it permanently instead of sweeping it forever.
+const SWEEPER_GIVE_UP_AFTER_MS = 60 * 60 * 1000; // 1 hour
+
+export async function runSweep(): Promise<void> {
+  // Find events stuck in unprocessed state for more than 2 minutes
+  const cutoff = new Date(Date.now() - 2 * 60 * 1000);
+  const stuck = await prisma.webhookEvent.findMany({
+    where: { processed: false, createdAt: { lt: cutoff } },
+    take: 50,
+    orderBy: { createdAt: "asc" },
+  });
+
+  if (stuck.length === 0) return;
+
+  const giveUpCutoff = new Date(Date.now() - SWEEPER_GIVE_UP_AFTER_MS);
+  const toGiveUpOn = stuck.filter((e) => e.createdAt < giveUpCutoff);
+  const toRetry = stuck.filter((e) => e.createdAt >= giveUpCutoff);
+
+  if (toGiveUpOn.length > 0) {
+    console.warn(`[Sweeper] Giving up on ${toGiveUpOn.length} event(s) stuck for over an hour`);
+    await prisma.webhookEvent.updateMany({
+      where: { id: { in: toGiveUpOn.map((e) => e.id) } },
+      data: { processed: true, processedAt: new Date(), processingError: "Sweeper gave up after 1h" },
+    });
+  }
+
+  if (toRetry.length === 0) return;
+
+  console.info(`[Sweeper] Found ${toRetry.length} unprocessed webhook event(s), re-enqueuing`);
+
+  const { webhookQueue } = await import("@/queues");
+
+  for (const event of toRetry) {
+    await webhookQueue.add(
+      "process-webhook",
+      {
+        webhookEventId: event.id,
+        rawPayload: JSON.stringify(event.rawPayload),
+        provider: event.provider,
+      },
+      {
+        // A fresh id each sweep — reusing `webhook_${event.id}` would silently
+        // no-op once the original job with that id has terminally failed in
+        // BullMQ. The handler itself re-checks `processed` so duplicate runs
+        // are still safe.
+        jobId: `webhook_${event.id}_sweep_${Date.now()}`,
+      }
+    );
+  }
+}
+
 export const sweeperWorker = new Worker<SweeperJobData>(
   SWEEPER_QUEUE,
-  async () => {
-    // Find events stuck in unprocessed state for more than 2 minutes
-    const cutoff = new Date(Date.now() - 2 * 60 * 1000);
-    const stuck = await prisma.webhookEvent.findMany({
-      where: { processed: false, createdAt: { lt: cutoff } },
-      take: 50,
-      orderBy: { createdAt: "asc" },
-    });
-
-    if (stuck.length === 0) return;
-
-    console.info(`[Sweeper] Found ${stuck.length} unprocessed webhook event(s), re-enqueuing`);
-
-    const { webhookQueue } = await import("@/queues");
-
-    for (const event of stuck) {
-      await webhookQueue.add(
-        "process-webhook",
-        {
-          webhookEventId: event.id,
-          rawPayload: JSON.stringify(event.rawPayload),
-          provider: event.provider,
-        },
-        {
-          jobId: `webhook_${event.id}`,
-          // addOrIgnore: if the job already exists (was just queued), skip
-        }
-      );
-    }
-  },
+  runSweep,
   { connection: redis, concurrency: 1 }
 );
 
